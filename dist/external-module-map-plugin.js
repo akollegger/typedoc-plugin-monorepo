@@ -1,0 +1,160 @@
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+(function (factory) {
+    if (typeof module === "object" && typeof module.exports === "object") {
+        var v = factory(require, exports);
+        if (v !== undefined) module.exports = v;
+    }
+    else if (typeof define === "function" && define.amd) {
+        define(["require", "exports", "path", "fs", "typedoc/dist/lib/converter/components", "typedoc/dist/lib/converter/converter", "typedoc/dist/lib/models/comments"], factory);
+    }
+})(function (require, exports) {
+    "use strict";
+    Object.defineProperty(exports, "__esModule", { value: true });
+    exports.ExternalModuleMapPlugin = void 0;
+    const path_1 = __importDefault(require("path"));
+    const fs_1 = __importDefault(require("fs"));
+    const components_1 = require("typedoc/dist/lib/converter/components");
+    const converter_1 = require("typedoc/dist/lib/converter/converter");
+    const comments_1 = require("typedoc/dist/lib/models/comments");
+    /**
+     * This plugin allows you to provide a mapping regexp between your source folder structure, and the module that should be
+     * reported in typedoc. It will match the first capture group of your regex and use that as the module name.
+     *
+     * Based on https://github.com/christopherthielen/typedoc-plugin-external-module-name
+     *
+     *
+     */
+    let ExternalModuleMapPlugin = class ExternalModuleMapPlugin extends components_1.ConverterComponent {
+        initialize() {
+            this.modules = new Set();
+            this.options = this.application.options;
+            this.listenTo(this.owner, {
+                [converter_1.Converter.EVENT_BEGIN]: this.onBegin,
+                [converter_1.Converter.EVENT_CREATE_DECLARATION]: this.onDeclarationBegin,
+                [converter_1.Converter.EVENT_RESOLVE_BEGIN]: this.onBeginResolve
+            });
+        }
+        /**
+         * Triggered when the converter begins converting a project.
+         */
+        onBegin() {
+            this.moduleRenames = [];
+            const externalmap = this.options.getValue("external-modulemap");
+            if (typeof externalmap === "string") {
+                try {
+                    console.log("INFO: applying regexp ", externalmap, " to calculate module names");
+                    this.mapRegEx = new RegExp(externalmap);
+                    this.isMappingEnabled = true;
+                    console.log("INFO: Enabled", this.isMappingEnabled);
+                }
+                catch (e) {
+                    console.log("WARN: external map not recognized. Not processing.", e);
+                }
+            }
+        }
+        onDeclarationBegin(context, reflection, node) {
+            if (!node || !this.isMappingEnabled)
+                return;
+            var fileName = node.fileName;
+            let match = this.mapRegEx.exec(fileName);
+            /*
+        
+            */
+            if (null != match) {
+                console.log(" Mapping ", fileName, " ==> ", match[1]);
+                this.modules.add(match[1]);
+                this.moduleRenames.push({
+                    renameTo: match[1],
+                    reflection: reflection
+                });
+            }
+        }
+        /**
+         * Triggered when the converter begins resolving a project.
+         *
+         * @param context  The context object describing the current state the converter is in.
+         */
+        onBeginResolve(context) {
+            let projRefs = context.project.reflections;
+            let refsArray = Object.keys(projRefs).reduce((m, k) => {
+                m.push(projRefs[k]);
+                return m;
+            }, []);
+            // Process each rename
+            this.moduleRenames.forEach(item => {
+                let renaming = item.reflection;
+                // Find an existing module that already has the "rename to" name.  Use it as the merge target.
+                let mergeTarget = (refsArray.filter(ref => ref.kind === renaming.kind && ref.name === item.renameTo)[0]);
+                // If there wasn't a merge target, just change the name of the current module and exit.
+                if (!mergeTarget) {
+                    renaming.name = item.renameTo;
+                    return;
+                }
+                if (!mergeTarget.children) {
+                    mergeTarget.children = [];
+                }
+                // Since there is a merge target, relocate all the renaming module's children to the mergeTarget.
+                let childrenOfRenamed = refsArray.filter(ref => ref.parent === renaming);
+                childrenOfRenamed.forEach((ref) => {
+                    // update links in both directions
+                    //console.log(' merging ', mergeTarget, ref);
+                    ref.parent = mergeTarget;
+                    mergeTarget.children.push(ref);
+                });
+                // Now that all the children have been relocated to the mergeTarget, delete the empty module
+                // Make sure the module being renamed doesn't have children, or they will be deleted
+                if (renaming.children)
+                    renaming.children.length = 0;
+                context.project.removeReflection(renaming);
+            });
+            this.modules.forEach((name) => {
+                let ref = refsArray
+                    .filter(ref => ref.name === name)
+                    .find(ref => path_1.default.isAbsolute(ref.originalName));
+                // tslint:disable-next-line ban-types
+                Object.defineProperty(ref, "kindString", {
+                    get() {
+                        return "Package";
+                    },
+                    set() {
+                        return "Package";
+                    }
+                });
+                const pathRoot = path_1.default.parse(ref.originalName).root;
+                const pathStack = path_1.default.dirname(ref.originalName).split(path_1.default.sep);
+                let readme = undefined;
+                do {
+                    if (name === pathStack[pathStack.length - 1]) {
+                        const readmePath = path_1.default.join(pathRoot, ...pathStack, "README.md");
+                        console.log(`Expecting README for ${name} at ${readmePath}`);
+                        try {
+                            readme = fs_1.default.readFileSync(readmePath);
+                        }
+                        catch (e) {
+                            console.log(`Error reading README.md at ${readmePath}`, e);
+                        }
+                    }
+                    pathStack.pop();
+                } while ((readme === undefined) && (pathStack.length > 0));
+                if (readme) {
+                    ref.comment = new comments_1.Comment("", readme.toString());
+                }
+                else {
+                    console.error(`No README found for module "${name}"`);
+                }
+            });
+        }
+    };
+    ExternalModuleMapPlugin = __decorate([
+        components_1.Component({ name: "external-module-map" })
+    ], ExternalModuleMapPlugin);
+    exports.ExternalModuleMapPlugin = ExternalModuleMapPlugin;
+});
